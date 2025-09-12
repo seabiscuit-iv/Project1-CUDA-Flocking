@@ -79,6 +79,7 @@ dim3 threadsPerBlock(blockSize);
 glm::vec3 *dev_pos;
 glm::vec3 *dev_vel1;
 glm::vec3 *dev_vel2;
+int tick = 0;
 
 // LOOK-2.1 - these are NOT allocated for you. You'll have to set up the thrust
 // pointers on your own too.
@@ -148,6 +149,7 @@ __global__ void kernGenerateRandomPosArray(int time, int N, glm::vec3 * arr, flo
 */
 void Boids::initSimulation(int N) {
   numObjects = N;
+  tick = 0;
   dim3 fullBlocksPerGrid((N + blockSize - 1) / blockSize);
 
   // LOOK-1.2 - This is basic CUDA memory management and error checking.
@@ -240,10 +242,47 @@ void Boids::copyBoidsToVBO(float *vbodptr_positions, float *vbodptr_velocities) 
 * in the `pos` and `vel` arrays.
 */
 __device__ glm::vec3 computeVelocityChange(int N, int iSelf, const glm::vec3 *pos, const glm::vec3 *vel) {
-  // Rule 1: boids fly towards their local perceived center of mass, which excludes themselves
-  // Rule 2: boids try to stay a distance d away from each other
   // Rule 3: boids try to match the speed of surrounding boids
-  return glm::vec3(0.0f, 0.0f, 0.0f);
+
+  glm::vec3 perceived_center;
+  int rule1Neighbors = 0;
+
+  glm::vec3 c;
+
+  glm::vec3 perceived_velocity;
+  int rule3Neighbors = 0;
+
+  for (int boid = 0; boid < N; boid++) {
+    if (boid == iSelf) {
+      continue;
+    }
+
+    // Rule 1: boids fly towards their local perceived center of mass, which excludes themselves
+    if ( glm::length( pos[boid] - pos[iSelf] ) < rule1Distance ) {
+      perceived_center += pos[boid];
+      rule1Neighbors++;
+    } 
+
+    // Rule 2: boids try to stay a distance d away from each other
+    if ( glm::length( pos[boid] - pos[iSelf] ) < rule2Distance ) {
+      c -= ( pos[boid] - pos[iSelf] );
+    }
+
+    if ( glm::length( pos[boid] - pos[iSelf] ) < rule3Distance ) {
+      perceived_velocity += vel[boid];
+      rule3Neighbors++;
+    }
+  }
+
+  perceived_center /= rule1Neighbors;
+  glm::vec3 rule1 = ( perceived_center - pos[iSelf] ) * rule1Scale;
+
+  glm::vec3 rule2 = c * rule2Scale;
+
+  perceived_velocity /= rule3Neighbors;
+  glm::vec3 rule3 = perceived_velocity * rule3Scale;
+
+  return vel[iSelf] + rule1 + rule2 + rule3;
 }
 
 /**
@@ -252,9 +291,22 @@ __device__ glm::vec3 computeVelocityChange(int N, int iSelf, const glm::vec3 *po
 */
 __global__ void kernUpdateVelocityBruteForce(int N, glm::vec3 *pos,
   glm::vec3 *vel1, glm::vec3 *vel2) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx >= N) {
+    return;
+  }
+
   // Compute a new velocity based on pos and vel1
+  glm::vec3 newVel = computeVelocityChange(N, idx, pos, vel1);
+
   // Clamp the speed
-  // Record the new velocity into vel2. Question: why NOT vel1?
+  float len = glm::length(newVel);
+  float speed = glm::min(maxSpeed, len);
+  newVel = glm::normalize(newVel) * speed;
+
+  // Record the new velocity into vel2. Not vel1 as that would create race conditions, as we are using ping-pong buffers
+  vel2[idx] = newVel;
 }
 
 /**
@@ -359,6 +411,24 @@ __global__ void kernUpdateVelNeighborSearchCoherent(
 void Boids::stepSimulationNaive(float dt) {
   // TODO-1.2 - use the kernels you wrote to step the simulation forward in time.
   // TODO-1.2 ping-pong the velocity buffers
+
+  glm::vec3* vel1 = (tick % 2 == 0) ? dev_vel1 : dev_vel2;
+  glm::vec3* vel2 = (tick % 2 == 1) ? dev_vel1 : dev_vel2;
+
+  int threadsPerBlock = blockSize;
+  int blocksPerGrid = (numObjects + threadsPerBlock - 1) / threadsPerBlock;
+
+  kernUpdateVelocityBruteForce<<<blocksPerGrid, threadsPerBlock>>>(numObjects, dev_pos, vel1, vel2);
+
+  cudaDeviceSynchronize();
+  checkCUDAErrorWithLine("Erorr in Boids::stepSimulationNaive @ kernUpdateVelocityBruteForce");
+
+  kernUpdatePos<<<blocksPerGrid, threadsPerBlock>>>(numObjects, dt, dev_pos, vel2);
+
+  cudaDeviceSynchronize();
+  checkCUDAErrorWithLine("Erorr in Boids::stepSimulationNaive @ kernUpdatePos");
+
+  tick++;
 }
 
 void Boids::stepSimulationScatteredGrid(float dt) {

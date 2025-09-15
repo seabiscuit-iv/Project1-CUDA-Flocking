@@ -802,40 +802,13 @@ void Boids::stepSimulationScatteredGrid(float dt) {
 #endif
 
 void Boids::stepSimulationCoherentGrid(float dt) {
-  // TODO-2.3 - start by copying Boids::stepSimulationNaiveGrid
-  // Uniform Grid Neighbor search using Thrust sort on cell-coherent data.
-  // In Parallel:
-  // - Label each particle with its array index as well as its grid index.
-  //   Use 2x width grids
-  // - Unstable key sort using Thrust. A stable sort isn't necessary, but you
-  //   are welcome to do a performance comparison.
-  // - Naively unroll the loop for finding the start and end indices of each
-  //   cell's data pointers in the array of boid indices
-  // - BIG DIFFERENCE: use the rearranged array index buffer to reshuffle all
-  //   the particle data in the simulation array.
-  //   CONSIDER WHAT ADDITIONAL BUFFERS YOU NEED
-  // - Perform velocity updates using neighbor search
-  // - Update positions
-  // - Ping-pong buffers as needed. THIS MAY BE DIFFERENT FROM BEFORE.
-
-    // TODO-2.1
-  // Uniform Grid Neighbor search using Thrust sort.
-  // In Parallel:
-
   int threadsPerBlock = blockSize;
   int blocksPerGrid = (numObjects + threadsPerBlock - 1) / threadsPerBlock;
 
-  // - label each particle with its array index as well as its grid index.
-  //   Use 2x width grids.
   kernComputeIndices<<<blocksPerGrid, threadsPerBlock>>>(
     numObjects, gridSideCount, gridMinimum, gridInverseCellWidth,
     dev_pos, dev_particleArrayIndices, dev_particleGridIndices
   );
-
-  checkCUDAErrorWithLine("Error in Boids::stepSimulationScatteredGrid @ kernComputeIndices");
-
-  // - Unstable key sort using Thrust. A stable sort isn't necessary, but you
-  //   are welcome to do a performance comparison.
 
   // - Ping-pong buffers as needed
   glm::vec3* vel1 = (tick % 2 == 0) ? dev_vel1 : dev_vel2;
@@ -844,39 +817,19 @@ void Boids::stepSimulationCoherentGrid(float dt) {
   glm::vec3* vel1_sorted = (tick % 2 == 0) ? dev_vel1_sorted : dev_vel2_sorted;
   glm::vec3* vel2_sorted = (tick % 2 == 1) ? dev_vel1_sorted : dev_vel2_sorted;
 
-  dev_thrust_particleArrayIndices = DPTR(dev_particleArrayIndices);
-  dev_thrust_particleGridIndices = DPTR(dev_particleGridIndices);
-  dev_thrust_pos = DPTR(dev_pos);
-  dev_thrust_vel1 = DPTR(vel1);
-  dev_thrust_vel2 = DPTR(vel2);
-  dev_thrust_pos_sorted = DPTR(dev_pos_sorted);
-  dev_thrust_vel1_sorted = DPTR(vel1_sorted);
-  dev_thrust_vel2_sorted = DPTR(vel2_sorted);
+  thrust::sort_by_key(DPTR(dev_particleGridIndices), DPTR(dev_particleGridIndices) + numObjects, DPTR(dev_particleArrayIndices));
 
-  thrust::sort_by_key(dev_thrust_particleGridIndices, dev_thrust_particleGridIndices + numObjects, dev_thrust_particleArrayIndices);
+  thrust::gather(DPTR(dev_particleArrayIndices), DPTR(dev_particleArrayIndices) + numObjects, DPTR(dev_pos), DPTR(dev_pos_sorted));
+  thrust::gather(DPTR(dev_particleArrayIndices), DPTR(dev_particleArrayIndices) + numObjects, DPTR(vel1), DPTR(vel1_sorted));
 
-  thrust::gather(dev_thrust_particleArrayIndices, dev_thrust_particleArrayIndices + numObjects, dev_thrust_pos, dev_thrust_pos_sorted);
-  thrust::gather(dev_thrust_particleArrayIndices, dev_thrust_particleArrayIndices + numObjects, dev_thrust_vel1, dev_thrust_vel1_sorted);
-
-  checkCUDAErrorWithLine("Error in Boids::stepSimulationScatteredGrid @ thrust::sort_by_key");
-
-  int blocksPerGrid_t = (gridCellCount + threadsPerBlock - 1) / threadsPerBlock;
-  kernResetIntBuffer<<<blocksPerGrid_t, threadsPerBlock>>>(gridCellCount, dev_gridCellStartIndices, -1);
-  kernResetIntBuffer<<<blocksPerGrid_t, threadsPerBlock>>>(gridCellCount, dev_gridCellEndIndices, -1);
-
-  checkCUDAErrorWithLine("Error in Boids::stepSimulationScatteredGrid @ kernResetIntBuffer");
+  cudaMemset(dev_gridCellStartIndices, -1, gridCellCount * sizeof(int));
+  cudaMemset(dev_gridCellEndIndices, -1, gridCellCount * sizeof(int));
 
   // - Naively unroll the loop for finding the start and end indices of each
   //   cell's data pointers in the array of boid indices
   kernIdentifyCellStartEnd<<<blocksPerGrid, threadsPerBlock>>>(
     numObjects, dev_particleGridIndices, dev_gridCellStartIndices, dev_gridCellEndIndices
   );
-
-  checkCUDAErrorWithLine("Error in Boids::stepSimulationScatteredGrid @ kernIdentifyCellStartEnd");
-
-  #if DEBUG
-  // printf("BPG %d, TPB %d\n", blocksPerGrid, threadsPerBlock);
-  #endif
 
   EVENT_START;
 
@@ -889,34 +842,19 @@ void Boids::stepSimulationCoherentGrid(float dt) {
   
   EVENT_END;
   
-  checkCUDAErrorWithLine("Error in Boids::stepSimulationScatteredGrid @ kernUpdateVelNeighborSearchScattered");
-
-  #if DEBUG
-  // thrust::transform(
-  //   DPTR(dev_gridCellEndIndices), DPTR(dev_gridCellEndIndices) + gridCellCount, DPTR(dev_gridCellStartIndices),
-  //   DPTR(dev_gridCellCounts),
-  //   thrust::minus<int>()
-  // );
-  // int total = thrust::reduce(
-  //   DPTR(dev_gridCellCounts), DPTR(dev_gridCellCounts) + gridCellCount, 0,
-  //   thrust::plus<int>()
-  // );
-  // float avg = float(total) / float(gridCellCount);
-  // printf("Average neighbor count: %f\n", avg );
-  #endif
-
   // We will use dev_particleGridIndices as an intermediate buffer
-  kernSetIndexBuffer<<<blocksPerGrid, threadsPerBlock>>>(numObjects, dev_particleGridIndices);
+  // kernSetIndexBuffer<<<blocksPerGrid, threadsPerBlock>>>(numObjects, dev_particleGridIndices);
+  thrust::sequence(DPTR(dev_particleGridIndices), DPTR(dev_particleGridIndices) + numObjects);
 
-  thrust::sort_by_key(dev_thrust_particleArrayIndices, dev_thrust_particleArrayIndices + numObjects, dev_thrust_particleGridIndices);
+  thrust::sort_by_key(DPTR(dev_particleArrayIndices), DPTR(dev_particleArrayIndices) + numObjects, DPTR(dev_particleGridIndices));
 
-  thrust::gather(dev_thrust_particleGridIndices, dev_thrust_particleGridIndices + numObjects, dev_thrust_pos_sorted, dev_thrust_pos);
-  thrust::gather(dev_thrust_particleGridIndices, dev_thrust_particleGridIndices + numObjects, dev_thrust_vel2_sorted, dev_thrust_vel2);
+  thrust::gather(DPTR(dev_particleGridIndices), DPTR(dev_particleGridIndices) + numObjects, DPTR(dev_pos_sorted), DPTR(dev_pos));
+  thrust::gather(DPTR(dev_particleGridIndices), DPTR(dev_particleGridIndices) + numObjects, DPTR(vel2_sorted), DPTR(vel2));
 
   // - Update positions
   kernUpdatePos<<<blocksPerGrid, threadsPerBlock>>>(numObjects, dt, dev_pos, vel2);
   
-  checkCUDAErrorWithLine("Error in Boids::stepSimulationScatteredGrid @ kernUpdatePos");
+  checkCUDAErrorWithLine("Error in Boids::stepSimulationCoherentGrid @ kernUpdatePos");
 
   tick++;
 }

@@ -49,7 +49,7 @@ void checkCUDAError(const char *msg, int line = -1) {
 *****************/
 
 /*! Block size used for CUDA kernel launch. */
-#define blockSize 128
+extern int blockSize;
 
 // LOOK-1.2 Parameters for the boids algorithm.
 // These worked well in our reference implementation.
@@ -494,10 +494,16 @@ __global__ void kernUpdateVelNeighborSearchScattered(
 
   glm::vec3 boid_pos = pos[idx];
 
+  int cellCount = gridResolution * gridResolution * gridResolution;
+
   glm::vec3 f_grid_cell = boid_pos - gridMin;
   f_grid_cell *= inverseCellWidth;
   glm::ivec3 grid_cell(f_grid_cell);
   int cell_index = gridIndex3Dto1D(grid_cell.x, grid_cell.y, grid_cell.z, gridResolution);
+
+  if (cell_index < 0 || cell_index > cellCount) {
+    return;
+  }
   
   glm::ivec3 grid_cell_octant;
   grid_cell_octant.x = (glm::fract(f_grid_cell.x) > 0.5f) ? 1 : -1;
@@ -516,13 +522,18 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   glm::vec3 perceived_velocity;
   int rule3Neighbors = 0;
 
-  for (int dx : xs) {
+  for (int dz : zs) {
     for (int dy : ys) {
-      for (int dz : zs) {
+      for (int dx : xs) {
         glm::ivec3 comp_cell(dx, dy, dz);
         comp_cell += grid_cell;
 
         int comp_cell_index = gridIndex3Dto1D(comp_cell.x, comp_cell.y, comp_cell.z, gridResolution);
+
+        if (comp_cell_index < 0 || comp_cell_index > cellCount) {
+          continue;
+        }
+
         int comp_cell_start = gridCellStartIndices[comp_cell_index]; // inclusive
         int comp_cell_end = gridCellEndIndices[comp_cell_index]; // exclusive
 
@@ -561,12 +572,12 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   }
 
   perceived_center /= rule1Neighbors;
-  glm::vec3 rule1 = ( perceived_center - pos[idx] ) * rule1Scale;
+  glm::vec3 rule1 = rule1Neighbors == 0 ? glm::vec3(0) : ( perceived_center - pos[idx] ) * rule1Scale;
 
   glm::vec3 rule2 = c * rule2Scale;
 
   perceived_velocity /= rule3Neighbors;
-  glm::vec3 rule3 = perceived_velocity * rule3Scale;
+  glm::vec3 rule3 = rule3Neighbors == 0 ? glm::vec3(0) : perceived_velocity * rule3Scale;
 
   glm::vec3 newVel = vel1[idx] + rule1 + rule2 + rule3;
 
@@ -574,6 +585,10 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   float speed = glm::min(maxSpeed, len);
   newVel = glm::normalize(newVel) * speed;
 
+  if ( glm::isnan(newVel.x) || glm::isnan(newVel.y) || glm::isnan(newVel.z) ) {
+    newVel = glm::vec3(0.0f);
+  }
+  
   vel2[idx] = newVel;
 }
 
@@ -704,7 +719,7 @@ __global__ void kernUpdateVelNeighborSearchCoherent(
 void Boids::stepSimulationNaive(float dt) {
   // TODO-1.2 - use the kernels you wrote to step the simulation forward in time.
   // TODO-1.2 ping-pong the velocity buffers
-
+  
   glm::vec3* vel1 = (tick % 2 == 0) ? dev_vel1 : dev_vel2;
   glm::vec3* vel2 = (tick % 2 == 1) ? dev_vel1 : dev_vel2;
 
@@ -831,7 +846,7 @@ void Boids::stepSimulationCoherentGrid(float dt) {
     numObjects, dev_particleGridIndices, dev_gridCellStartIndices, dev_gridCellEndIndices
   );
 
-  EVENT_START;
+  // EVENT_START;
 
   // - Perform velocity updates using neighbor search
   kernUpdateVelNeighborSearchCoherent<<<blocksPerGrid, threadsPerBlock>>>(
@@ -840,7 +855,7 @@ void Boids::stepSimulationCoherentGrid(float dt) {
     dev_pos_sorted, vel1_sorted, vel2_sorted
   );
   
-  EVENT_END;
+  // EVENT_END;
   
   // We will use dev_particleGridIndices as an intermediate buffer
   // kernSetIndexBuffer<<<blocksPerGrid, threadsPerBlock>>>(numObjects, dev_particleGridIndices);

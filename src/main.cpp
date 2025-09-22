@@ -23,11 +23,8 @@
 
 // LOOK-2.1 LOOK-2.3 - toggles for UNIFORM_GRID and COHERENT_GRID
 #define VISUALIZE 1
-#define UNIFORM_GRID 1
-#define COHERENT_GRID 1
 
 // LOOK-1.2 - change this to adjust particle count in the simulation
-const int N_FOR_VIS = 50000;
 const float DT = 0.2f;
 
 /**
@@ -51,6 +48,11 @@ int main(int argc, char* argv[]) {
 
 std::string deviceName;
 GLFWwindow *window;
+int num_boids = 50000;
+
+int mode = 2;
+int max_frames = -1;
+int blockSize = 128;
 
 /**
 * Initialization of CUDA and GLFW.
@@ -72,6 +74,69 @@ bool init(int argc, char **argv) {
   int major = deviceProp.major;
   int minor = deviceProp.minor;
 
+  if (argc > 1) {
+    //argument handling
+    for ( int arg = 1; arg < argc; arg += 2 ) {
+      std::string flag( argv[arg] );
+
+      if ( arg + 1 == argc ) {
+        printf("ERROR: No argument provided for flag %s\n", flag);
+        std::cout.flush();
+      }
+
+      std::string value( argv[arg+1] );
+
+      if ( flag == "-mode" ) {
+        if ( value == "Naive" ) {
+          mode = 0;
+        } 
+        else if ( value == "ScatteredGrid" ) {
+          mode = 1;
+        }
+        else if ( value == "CoherentGrid" ) {
+          mode = 2;
+        }
+        else {
+          printf("ERROR: incorrect parameter for flag -mode (Naive, ScatteredGrid, CoherentGrid)\n");
+          std::cout.flush();
+          exit(1);
+        }
+      }
+      else if ( flag == "-frames" ) {
+        try {
+          max_frames = std::stoi(value);
+        } catch (...) { 
+          printf("ERROR: incorrect value type for flag -frames, requires integer\n");
+          std::cout.flush();
+          exit(1);
+        }
+      }
+      else if ( flag == "-boids" ) {
+        try {
+          num_boids = std::stoi(value);
+        } catch (...) { 
+          printf("ERROR: incorrect value type for flag -boids, requires integer\n");
+          std::cout.flush();
+          exit(1);
+        }
+      }
+      else if ( flag == "-blocksize" ) {
+        try {
+          blockSize = std::stoi(value);
+        } catch (...) { 
+          printf("ERROR: incorrect value type for flag -blocksize, requires integer\n");
+          std::cout.flush();
+          exit(1);
+        }
+      }
+      else {
+        printf("ERROR: no known flag %s\n", flag);
+        std::cout.flush();
+        exit(1);
+      }
+    }
+  }
+
   std::ostringstream ss;
   ss << projectName << " [SM " << major << "." << minor << " " << deviceProp.name << "]";
   deviceName = ss.str();
@@ -92,7 +157,7 @@ bool init(int argc, char **argv) {
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-  window = glfwCreateWindow(width, height, deviceName.c_str(), NULL, NULL);
+  window = glfwCreateWindow(width, height, deviceName.c_str(), glfwGetPrimaryMonitor(), NULL);
   if (!window) {
     glfwTerminate();
     return false;
@@ -118,7 +183,7 @@ bool init(int argc, char **argv) {
   cudaGLRegisterBufferObject(boidVBO_velocities);
 
   // Initialize N-body simulation
-  Boids::initSimulation(N_FOR_VIS);
+  Boids::initSimulation(num_boids);
 
   updateCamera();
 
@@ -131,13 +196,13 @@ bool init(int argc, char **argv) {
 
 void initVAO() {
 
-  std::unique_ptr<GLfloat[]> bodies{ new GLfloat[4 * (N_FOR_VIS)] };
-  std::unique_ptr<GLuint[]> bindices{ new GLuint[N_FOR_VIS] };
+  std::unique_ptr<GLfloat[]> bodies{ new GLfloat[4 * (num_boids)] };
+  std::unique_ptr<GLuint[]> bindices{ new GLuint[num_boids] };
 
   glm::vec4 ul(-1.0, -1.0, 1.0, 1.0);
   glm::vec4 lr(1.0, 1.0, 0.0, 0.0);
 
-  for (int i = 0; i < N_FOR_VIS; i++) {
+  for (int i = 0; i < num_boids; i++) {
     bodies[4 * i + 0] = 0.0f;
     bodies[4 * i + 1] = 0.0f;
     bodies[4 * i + 2] = 0.0f;
@@ -155,19 +220,19 @@ void initVAO() {
 
   // Bind the positions array to the boidVAO by way of the boidVBO_positions
   glBindBuffer(GL_ARRAY_BUFFER, boidVBO_positions); // bind the buffer
-  glBufferData(GL_ARRAY_BUFFER, 4 * (N_FOR_VIS) * sizeof(GLfloat), bodies.get(), GL_DYNAMIC_DRAW); // transfer data
+  glBufferData(GL_ARRAY_BUFFER, 4 * (num_boids) * sizeof(GLfloat), bodies.get(), GL_DYNAMIC_DRAW); // transfer data
 
   glEnableVertexAttribArray(positionLocation);
   glVertexAttribPointer((GLuint)positionLocation, 4, GL_FLOAT, GL_FALSE, 0, 0);
 
   // Bind the velocities array to the boidVAO by way of the boidVBO_velocities
   glBindBuffer(GL_ARRAY_BUFFER, boidVBO_velocities);
-  glBufferData(GL_ARRAY_BUFFER, 4 * (N_FOR_VIS) * sizeof(GLfloat), bodies.get(), GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, 4 * (num_boids) * sizeof(GLfloat), bodies.get(), GL_DYNAMIC_DRAW);
   glEnableVertexAttribArray(velocitiesLocation);
   glVertexAttribPointer((GLuint)velocitiesLocation, 4, GL_FLOAT, GL_FALSE, 0, 0);
 
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boidIBO);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, (N_FOR_VIS) * sizeof(GLuint), bindices.get(), GL_STATIC_DRAW);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, (num_boids) * sizeof(GLuint), bindices.get(), GL_STATIC_DRAW);
 
   glBindVertexArray(0);
 }
@@ -204,14 +269,15 @@ void initShaders(GLuint * program) {
     cudaGLMapBufferObject((void**)&dptrVertPositions, boidVBO_positions);
     cudaGLMapBufferObject((void**)&dptrVertVelocities, boidVBO_velocities);
 
-    // execute the kernel
-    #if UNIFORM_GRID && COHERENT_GRID
-    Boids::stepSimulationCoherentGrid(DT);
-    #elif UNIFORM_GRID
-    Boids::stepSimulationScatteredGrid(DT);
-    #else
-    Boids::stepSimulationNaive(DT);
-    #endif
+    if (mode == 2) {
+      Boids::stepSimulationCoherentGrid(DT);
+    } 
+    else if (mode == 1) {
+      Boids::stepSimulationScatteredGrid(DT);
+    }
+    else if (mode == 0) {
+      Boids::stepSimulationNaive(DT);
+    }
 
     #if VISUALIZE
     Boids::copyBoidsToVBO(dptrVertPositions, dptrVertVelocities);
@@ -225,6 +291,7 @@ void initShaders(GLuint * program) {
     double fps = 0;
     double timebase = 0;
     int frame = 0;
+    int curr_frame = 0;;
 
     Boids::unitTest(); // LOOK-1.2 We run some basic example code to make sure
                        // your CUDA development setup is ready to go.
@@ -233,6 +300,12 @@ void initShaders(GLuint * program) {
       glfwPollEvents();
 
       frame++;
+      curr_frame++;
+
+      if ( max_frames != -1 && curr_frame > max_frames ) {
+        break;
+      }
+
       double time = glfwGetTime();
 
       if (time - timebase > 1.0) {
@@ -240,6 +313,8 @@ void initShaders(GLuint * program) {
         timebase = time;
         frame = 0;
       }
+      printf("FPS %f\n", fps);
+      std::cout.flush();
 
       runCUDA();
 
@@ -256,7 +331,7 @@ void initShaders(GLuint * program) {
       glUseProgram(program[PROG_BOID]);
       glBindVertexArray(boidVAO);
       glPointSize((GLfloat)pointSize);
-      glDrawElements(GL_POINTS, N_FOR_VIS + 1, GL_UNSIGNED_INT, 0);
+      glDrawElements(GL_POINTS, num_boids + 1, GL_UNSIGNED_INT, 0);
       glPointSize(1.0f);
 
       glUseProgram(0);
